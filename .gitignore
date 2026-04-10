@@ -1,0 +1,6 @@
+.pio/
+.vscode/
+*.bin
+!schematic/*.pdf
+__pycache__/
+*.pyc
