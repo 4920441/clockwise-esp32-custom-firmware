@@ -12,11 +12,11 @@ This is a 64x64 RGB LED matrix panel (HUB75E, P3 pitch) with a custom ESP32 cont
 
 | Component | Details |
 |-----------|---------|
-| MCU | ESP32-WROOM-32E (original ESP32, not S2/S3) |
-| Display | 64x64 RGB LED matrix, HUB75E interface, 1/32 scan |
+| MCU | ESP32-WROOM-32E (ESP32-D0WD-V3 rev 3.1), Dual Core, 240MHz |
+| Display | 64x64 RGB LED matrix, HUB75E interface, FM6126A driver IC |
 | USB-C | **Power only** — no D+/D- data lines connected |
-| Serial header | 4-pin pad (3V3, RX, TX, GND) — unpopulated |
-| Buttons | BOOT (IO0) + RESET (EN) on the PCB |
+| Serial header | 4-pin pad H2 (3V3, RX, TX, GND) — unpopulated |
+| Buttons | BOOT (IO0 / SW5) + RESET (EN / SW4) — may be unpopulated |
 | LDR | GPIO 34 (analog, for auto-brightness) |
 | Buzzer | GPIO 2 (via transistor) |
 | Power | 5V via USB-C, AMS1117-3.3 regulator for ESP32 |
@@ -27,7 +27,7 @@ This is a 64x64 RGB LED matrix panel (HUB75E, P3 pitch) with a custom ESP32 cont
 
 ### HUB75E Pin Mapping
 
-Extracted from the [PCB schematic](schematic/clockwise-pcb-schematic.pdf):
+Extracted from the [PCB schematic](schematic/clockwise-pcb-schematic.pdf) and confirmed by binary analysis of the stock firmware:
 
 | HUB75E Pin | Signal | ESP32 GPIO |
 |-----------|--------|------------|
@@ -38,7 +38,7 @@ Extracted from the [PCB schematic](schematic/clockwise-pcb-schematic.pdf):
 | 5 | R2 | IO14 |
 | 6 | G2 | IO12 |
 | 7 | B2 | IO13 |
-| 8 | E | IO32 |
+| 8 | E | **unknown — see [Display Issues](#display-issues)** |
 | 9 | A | IO23 |
 | 10 | B | IO19 |
 | 11 | C | IO5 |
@@ -47,6 +47,8 @@ Extracted from the [PCB schematic](schematic/clockwise-pcb-schematic.pdf):
 | 14 | LAT | IO4 |
 | 15 | OE | IO15 |
 | 16 | GND | - |
+
+> **Note:** Pins R1 through D and CLK/LAT/OE were confirmed by extracting the `i2s_pins` struct from the stock firmware binary at offset `0x0019c6`. The stock firmware compiles with **E=-1** (not connected) in the pin struct, yet drives a 64x64 panel correctly. The E pin is likely set at runtime or the panel uses a non-standard scan method. See [Display Issues](#display-issues).
 
 ## Stock Firmware: ClockWise Plus
 
@@ -162,19 +164,112 @@ You'll see the requests in the spoof server and nginx logs.
 
 ### Step 6: Done!
 
-After reboot, the display shows a rainbow test pattern with "BRIDGE FW / OTA ready" and the IP address. From now on, flash any firmware at:
+After reboot, the display shows a test pattern and the IP address. From now on, flash any firmware at:
 
 ```
 http://<clock-ip>/update
 ```
 
+**Note:** ElegantOTA v3 uses a JavaScript-based upload UI. Use the **browser** at `http://<clock-ip>/update` to upload `.bin` files — `curl`-based uploads are unreliable with this library.
+
 Clean up:
 - Remove DNS override for `www.topyuan.top`
 - `sudo rm /etc/nginx/conf.d/topyuan-spoof.conf && sudo nginx -s reload`
 
-## Alternative: Serial Flash
+## Display Issues
 
-If you prefer a wired approach, the PCB has an unpopulated 4-pin serial header (labeled `3V3 RX TX GND` on the silkscreen). Connect a USB-to-serial adapter (CP2102/CH340), hold BOOT, press RESET, and flash with esptool:
+### E Pin Mystery (Work in Progress)
+
+The 64x64 panel requires an E address line (HUB75E) for 1/32 scan addressing. However, the stock Clockwise firmware compiles with **E=-1** (disconnected) in the library's pin struct. Despite this, the stock firmware displays correctly on 64x64 panels.
+
+**What we've observed:**
+- The stock firmware works perfectly on the 64x64 panel
+- Replacing it via OTA (without power cycling) also works — because the stock firmware already initialized the FM6126A panel hardware
+- After a **cold boot** (power cycle), custom firmware shows display artifacts: row overlapping, garbled text, and blank lines — symptoms of incorrect E pin or address line configuration
+
+**E pin candidates tested:**
+
+| GPIO | Result |
+|------|--------|
+| -1 | Rows overlap (top half folds onto bottom half) |
+| 32 | Garbled display after power cycle |
+| 33 | Garbled display after power cycle |
+| 18 | Garbled display after power cycle |
+| 22 | Garbled display after power cycle |
+| 8 | **BRICKED** — GPIO 8 is SPI flash data line, crashes bootloader |
+| 2 | Not tested (buzzer pin) |
+
+**How the stock firmware handles this is still unknown.** Possible explanations:
+1. The E pin is set at runtime from NVS/preferences (not found in binary analysis)
+2. The panel uses a non-standard scan method (1/16 scan with virtual pixel mapping)
+3. An older library version handles 64x64 panels differently
+
+If you figure out the correct E pin or scan configuration, please open an issue or PR!
+
+### FM6126A Driver
+
+The panel uses FM6126A LED driver ICs which require a special initialization sequence at power-on. Set the driver in the library config:
+
+```cpp
+mxconfig.driver = HUB75_I2S_CFG::FM6126A;
+```
+
+Without this, the display shows garbled output even with correct pin mapping.
+
+## Serial Recovery
+
+If the device becomes unresponsive (e.g., from a bad GPIO configuration), recovery requires the serial header since USB-C carries no data.
+
+### Dangerous GPIOs — Do NOT Use
+
+**Never configure these GPIOs as HUB75 outputs — they are used for SPI flash and will crash the ESP32:**
+
+| GPIO | Function |
+|------|----------|
+| 6 | Flash CLK |
+| 7 | Flash D0 (SD0) |
+| 8 | Flash D1 (SD1) |
+| 9 | Flash D2 (SD2) |
+| 10 | Flash D3 (SD3) |
+| 11 | Flash CMD |
+
+### Serial Header (H2) Wiring
+
+```
+Board H2        USB-to-Serial Adapter (CP2102/CH340)
+--------        ------------------------------------
+RX     -------> TX   (crossed!)
+TX     -------> RX   (crossed!)
+GND    -------> GND
+3V3              (don't connect — power via USB-C)
+```
+
+### Entering Download Mode
+
+On the ESP32-WROOM-32E module:
+- **IO0** (GPIO 0, pin 25 on module) — must be held LOW during reset
+- **EN** (pin 3 on module) — pull briefly LOW to reset
+
+Procedure:
+1. Connect serial adapter to H2
+2. Hold **BOOT** button (IO0 → GND)
+3. While holding BOOT, press and release **RESET** (EN → GND)
+4. Release BOOT
+5. ESP32 is now in download mode
+
+If BOOT/RESET buttons are not populated, bridge the pins directly on the ESP32-WROOM-32E module.
+
+### NVS Recovery (Erase Bad Settings)
+
+If the device is stuck in a boot loop due to a bad saved setting:
+
+```bash
+esptool.py --port /dev/ttyUSB0 erase-region 0x9000 0x5000
+```
+
+This erases only the NVS partition (saved preferences), restoring default settings without reflashing firmware.
+
+### Full Reflash
 
 ```bash
 esptool.py --port /dev/ttyUSB0 --baud 460800 write_flash 0x10000 firmware.bin
@@ -188,10 +283,10 @@ Use the pin mapping above with the [ESP32-HUB75-MatrixPanel-DMA](https://github.
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 
 HUB75_I2S_CFG::i2s_pins pins = {
-    25, 26, 27,       // R1, G1, B1
-    14, 12, 13,       // R2, G2, B2
-    23, 19, 5, 17, 32, // A, B, C, D, E
-    4, 15, 16          // LAT, OE, CLK
+    25, 26, 27,        // R1, G1, B1
+    14, 12, 13,        // R2, G2, B2
+    23, 19, 5, 17, -1, // A, B, C, D, E (E pin TBD — see Display Issues)
+    4, 15, 16           // LAT, OE, CLK
 };
 
 HUB75_I2S_CFG mxconfig(64, 64, 1);
