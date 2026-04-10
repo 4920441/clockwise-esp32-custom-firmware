@@ -38,7 +38,7 @@ Extracted from the [PCB schematic](schematic/clockwise-pcb-schematic.pdf) and co
 | 5 | R2 | IO14 |
 | 6 | G2 | IO12 |
 | 7 | B2 | IO13 |
-| 8 | E | **unknown — see [Display Issues](#display-issues)** |
+| 8 | E | **IO18** |
 | 9 | A | IO23 |
 | 10 | B | IO19 |
 | 11 | C | IO5 |
@@ -48,7 +48,7 @@ Extracted from the [PCB schematic](schematic/clockwise-pcb-schematic.pdf) and co
 | 15 | OE | IO15 |
 | 16 | GND | - |
 
-> **Note:** Pins R1 through D and CLK/LAT/OE were confirmed by extracting the `i2s_pins` struct from the stock firmware binary at offset `0x0019c6`. The stock firmware compiles with **E=-1** (not connected) in the pin struct, yet drives a 64x64 panel correctly. The E pin is likely set at runtime or the panel uses a non-standard scan method. See [Display Issues](#display-issues).
+> **Note:** Pins R1 through D and CLK/LAT/OE were confirmed by extracting the `i2s_pins` struct from the stock firmware binary at offset `0x0019c6`. The stock firmware compiles with **E=-1** in the pin struct but sets it to GPIO 18 at runtime. The E pin was determined experimentally by cycling through candidates.
 
 ## Stock Firmware: ClockWise Plus
 
@@ -194,17 +194,12 @@ The 64x64 panel requires an E address line (HUB75E) for 1/32 scan addressing. Ho
 | -1 | Rows overlap (top half folds onto bottom half) |
 | 32 | Garbled display after power cycle |
 | 33 | Garbled display after power cycle |
-| 18 | Garbled display after power cycle |
+| **18** | **CORRECT — clean display, all rows working** |
 | 22 | Garbled display after power cycle |
 | 8 | **BRICKED** — GPIO 8 is SPI flash data line, crashes bootloader |
 | 2 | Not tested (buzzer pin) |
 
-**How the stock firmware handles this is still unknown.** Possible explanations:
-1. The E pin is set at runtime from NVS/preferences (not found in binary analysis)
-2. The panel uses a non-standard scan method (1/16 scan with virtual pixel mapping)
-3. An older library version handles 64x64 panels differently
-
-If you figure out the correct E pin or scan configuration, please open an issue or PR!
+**Resolved:** The correct E pin is **GPIO 18**. The stock firmware sets this at runtime (not visible in the compiled pin struct default). Confirmed working after cold boot with FM6126A driver.
 
 ### FM6126A Driver
 
@@ -285,7 +280,7 @@ Use the pin mapping above with the [ESP32-HUB75-MatrixPanel-DMA](https://github.
 HUB75_I2S_CFG::i2s_pins pins = {
     25, 26, 27,        // R1, G1, B1
     14, 12, 13,        // R2, G2, B2
-    23, 19, 5, 17, -1, // A, B, C, D, E (E pin TBD — see Display Issues)
+    23, 19, 5, 17, 18, // A, B, C, D, E
     4, 15, 16           // LAT, OE, CLK
 };
 
