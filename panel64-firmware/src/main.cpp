@@ -21,10 +21,10 @@
 // ─── Config ───────────────────────────────────────────────────────
 static const char* WIFI_SSID = "YOUR_SSID";
 static const char* WIFI_PASS = "YOUR_PASSWORD";
-static const char* NTP_SERVER = "pool.ntp.org";  // or your local NTP server
-static const char* TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";  // adjust for your timezone
+static const char* NTP_SERVER = "pool.ntp.org";
+static const char* TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";
 // InfluxDB: 4 queries combined into one multi-query request
-static const char* INFLUX_HOST = "192.168.1.10";  // your InfluxDB host
+static const char* INFLUX_HOST = "192.168.1.10";
 static const int   INFLUX_PORT = 8086;
 static const char* INFLUX_DB   = "telegraf";
 // Queries joined with semicolons; results come back in same order.
@@ -104,6 +104,7 @@ float dTemp = -999, dSolarKwh = -999;
 int dSolarW = 0;
 bool dValid = false;
 unsigned long lastFetch = 0;
+String lastFetchStatus = "never";   // shown on /
 
 // ─── LDR auto-brightness ────────────────────────────────────────
 #define LDR_PIN 35
@@ -647,24 +648,30 @@ void fetchData() {
     int code = http.GET();
     if (code != 200) {
         Serial.printf("[INFLUX] HTTP %d\n", code);
+        lastFetchStatus = "HTTP " + String(code);
         http.end();
         return;
     }
 
     // Parse the multi-result JSON response
-    // { "results": [ {statement_id:0, series:[{values:[[...,val]]}] }, ... ] }
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, http.getStream());
+    String body = http.getString();
     http.end();
+    Serial.printf("[INFLUX] received %d bytes\n", body.length());
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, body);
 
     if (err) {
         Serial.printf("[INFLUX] JSON parse error: %s\n", err.c_str());
+        Serial.println(body.substring(0, 200));
+        lastFetchStatus = String("parse err: ") + err.c_str() + " (" + body.length() + "B)";
         return;
     }
 
     JsonArray results = doc["results"];
     if (results.isNull() || results.size() < 4) {
         Serial.println("[INFLUX] unexpected response structure");
+        lastFetchStatus = "bad response (results.size=" + String(results.size()) + ")";
         return;
     }
 
@@ -683,6 +690,9 @@ void fetchData() {
         dSolarW = (int)(-vGrid);
     }
     dValid = (okTemp || okSolax || okEco || okGrid);
+
+    lastFetchStatus = "OK t=" + String(okTemp) + " s=" + String(okSolax)
+                    + " e=" + String(okEco) + " g=" + String(okGrid);
 
     Serial.printf("[INFLUX] temp=%.1f solar=%.1f watts=%d (t=%d s=%d e=%d g=%d)\n",
                   dTemp, dSolarKwh, dSolarW, okTemp, okSolax, okEco, okGrid);
@@ -721,6 +731,8 @@ void handleRoot() {
         h += "<tr><td>Temp</td><td>" + String(dTemp, 1) + " C</td></tr>";
         h += "<tr><td>Solar</td><td>" + String(dSolarKwh, 1) + " kWh / " + String(dSolarW) + " W</td></tr>";
     }
+    h += "<tr><td>InfluxDB</td><td>" + lastFetchStatus + "</td></tr>";
+    h += "<tr><td>Last fetch</td><td>" + String((millis() - lastFetch) / 1000) + "s ago</td></tr>";
     h += "<tr><td>LDR raw</td><td>" + String(ldrSmoothed) + "</td></tr>";
     h += "<tr><td>Brightness</td><td>" + String(currentBrightness) + (autoBrightness ? " (auto)" : " (manual)") + "</td></tr>";
     h += "<tr><td>MQTT</td><td>" + String(mqtt.connected() ? "connected" : (mqttHost[0] ? "disconnected" : "not configured")) + "</td></tr>";
