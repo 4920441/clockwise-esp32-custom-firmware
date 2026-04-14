@@ -17,7 +17,7 @@ This is a 64x64 RGB LED matrix panel (HUB75E, P3 pitch) with a custom ESP32 cont
 | USB-C | **Power only** — no D+/D- data lines connected |
 | Serial header | 4-pin pad H2 (3V3, RX, TX, GND) — unpopulated |
 | Buttons | BOOT (IO0 / SW5) + RESET (EN / SW4) — may be unpopulated |
-| LDR | GPIO 34 (analog, for auto-brightness) |
+| LDR | GPIO 35 (analog, for auto-brightness) |
 | Buzzer | GPIO 2 (via transistor) |
 | Power | 5V via USB-C, AMS1117-3.3 regulator for ESP32 |
 
@@ -291,6 +291,96 @@ mxconfig.driver = HUB75_I2S_CFG::FM6126A;
 ```
 
 Include ElegantOTA in your project so you keep wireless upload capability.
+
+## Panel64 Firmware
+
+The [`panel64-firmware/`](panel64-firmware/) directory contains a complete replacement firmware turning the clock into a self-contained smart dashboard. No Python proxy, no companion app — just the ESP32 talking directly to your existing infrastructure.
+
+### Features
+
+- **Solari split-flap (Fallblattanzeiger) idle display** — date, time, outside temperature, solar yield today (kWh), current power (W)
+  - Uses a physical drum model: characters rotate through intermediate glyphs with a split-flap flip animation and asynchronous per-cell timing (the cascading "waterfall" effect)
+  - Color-coded watts line: green when producing (exporting), red when importing, white when balanced
+- **LDR auto-brightness** — GPIO 35, ambient-light driven, smoothed to avoid flicker
+- **NTP clock** — with DST-aware POSIX timezone string
+- **Direct InfluxDB queries** — one combined multi-query HTTP request every 30 seconds. No intermediate proxy server needed.
+- **MQTT rotating values** — the temperature row cycles through any number of user-configured MQTT topics. Background "sniff" mode discovers both sub-topics and JSON payload fields (for zigbee2mqtt style devices). Configure via `http://<ip>/mqtt`
+- **UDP video mode** — receive 64x64 RGB888 frames on UDP port 5005 (12288 bytes/frame, 4-byte chunked protocol). Video and animations play whenever frames arrive; after 5 seconds of no packets, falls back to the split-flap display.
+- **Web OTA** — drop a new `firmware.bin` at `http://<ip>/update` (ElegantOTA v3)
+- **MQTT debug page** — `/mqtt/debug` shows connection state, configured items, last 10 received topics, and total message count for diagnostics
+
+### Architecture
+
+```
+  ┌──────────────┐    WiFi     ┌──────────────┐
+  │    Panel64   │◄──────────► │  WiFi router │
+  │  (ESP32 +    │             └──────────────┘
+  │   HUB75)     │                    │
+  └──────┬───────┘                    │
+         │                            ▼
+         │                   ┌────────────────┐
+         │◄──── HTTP ────────│   InfluxDB     │ solar & temperature
+         │                   │  :8086         │
+         │                   └────────────────┘
+         │
+         │                   ┌────────────────┐
+         │◄──── MQTT ───────►│  MQTT broker   │ rotating values,
+         │                   │  :1883         │ zigbee devices, etc.
+         │                   └────────────────┘
+         │
+         │                   ┌────────────────┐
+         │◄──── NTP ─────────│  NTP server    │
+         │                   └────────────────┘
+         │
+         │◄──── UDP ─────────   any sender (video, pixel art, scripts)
+         │      :5005
+         │
+         ▼
+   HTTP ElegantOTA at :80/update  (future firmware flashes)
+```
+
+No Python services, no proxies — the device talks directly to standard services you probably already have. MQTT is optional; if not configured, the firmware still works (just no rotating MQTT items).
+
+### Configuration
+
+Edit `panel64-firmware/src/main.cpp`:
+
+```cpp
+const char* WIFI_SSID = "YOUR_SSID";
+const char* WIFI_PASS = "YOUR_PASSWORD";
+const char* NTP_SERVER = "pool.ntp.org";
+const char* TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";
+const char* INFLUX_HOST = "192.168.1.10";
+const int   INFLUX_PORT = 8086;
+const char* INFLUX_DB   = "telegraf";
+```
+
+If you don't have InfluxDB, comment out the `fetchData()` call and the display will just show the clock and any MQTT values you configure. Adjust the queries in `INFLUX_MULTI_Q` to match your schema (the default queries are tuned for a SolaX + EcoFlow + Panasonic heat pump setup — see comments in the source).
+
+### MQTT rotation items
+
+Visit `http://<ip>/mqtt`:
+- Set broker host/port/credentials
+- Set rotation interval (seconds)
+- Enter a topic prefix (e.g., `panasonic_heat_pump/main` or `zigbee2mqtt/YourDevice`) and click **Start** — the ESP32 subscribes in the background and lists discovered sub-topics AND JSON fields from leaf topics
+- Pick an entry from the dropdown, add a 4-char label and 1-2 char unit, click Add
+- Works with zigbee2mqtt-style devices that publish JSON payloads: the `temperature`, `humidity`, `battery` fields etc. are discovered automatically
+
+### UDP video sender
+
+The [`ota-spoof/send-video.py`](ota-spoof/send-video.py) script pushes any video/GIF/image to the panel:
+
+```bash
+# Play a GIF (loops forever)
+python3 send-video.py --host <panel-ip> animation.gif
+
+# Play a video
+python3 send-video.py --host <panel-ip> --fps 25 --loop video.mp4
+
+# Pipe from ffmpeg for screen capture, webcam, etc.
+ffmpeg -i input.mp4 -vf scale=64:64 -pix_fmt rgb24 -f rawvideo pipe:1 | \
+  python3 send-video.py --host <panel-ip> --raw --fps 25
+```
 
 ## Related Projects
 
